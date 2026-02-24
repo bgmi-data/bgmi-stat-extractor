@@ -1,243 +1,297 @@
 /**
- * BGMI STAT EXTRACTOR — app.js
- * Browser-based OCR using Tesseract.js
- * No external AI. No API cost. Runs 100% locally.
+ * BGMI STAT EXTRACTOR — app.js v2
+ * ─────────────────────────────────
+ * • Single upload zone — drop ALL images together
+ * • Ctrl+V paste from clipboard support
+ * • Auto-detects lobby vs result via OCR text analysis
+ * • Fuzzy player-name matching for cross-reference
+ * • 6-row padded output (Blocks 4 & 5)
+ * • Runs 100% in browser — zero cost, zero API
  */
 
-// ═══════════════════════════════════════
-// STATE
-// ═══════════════════════════════════════
-let lobbyFiles = [];
-let resultFiles = [];
-let lastLobbyText = '';
-let lastResultText = '';
+'use strict';
 
-// ═══════════════════════════════════════
-// SESSION TIMESTAMP
-// ═══════════════════════════════════════
-function updateSessionTime() {
-  const now = new Date();
-  const day = String(now.getDate()).padStart(2, '0');
-  const mon = now.toLocaleString('en-US', { month: 'short' });
-  let h = now.getHours();
-  const m = String(now.getMinutes()).padStart(2, '0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
+// ═══════════════════════════════ STATE ════════════════════════════════
+const state = {
+  files: [],          // { file, url, id }
+  ocrResults: [],     // { id, text, type: 'lobby'|'result'|'unknown' }
+};
+
+// ═══════════════════════════════ TIMESTAMP ════════════════════════════
+function stamp() {
+  const d = new Date();
+  const day = String(d.getDate()).padStart(2, '0');
+  const mon = d.toLocaleString('en-US', { month: 'short' });
+  let h = d.getHours(), m = String(d.getMinutes()).padStart(2, '0');
+  const ap = h >= 12 ? 'PM' : 'AM';
   h = h % 12 || 12;
-  document.getElementById('sessionTime').textContent = `${day}/${mon} · ${h}:${m} ${ampm}`;
+  return `${day}/${mon} · ${h}:${m} ${ap}`;
 }
-updateSessionTime();
-setInterval(updateSessionTime, 30000);
+function refreshStamp() { $('#sessionStamp').textContent = stamp(); }
+refreshStamp();
+setInterval(refreshStamp, 30000);
 
-// ═══════════════════════════════════════
-// FILE HANDLING — DRAG & DROP + INPUT
-// ═══════════════════════════════════════
-function setupZone(zoneId, dropId, inputId, previewId, countId, fileArray) {
-  const zone = document.getElementById(zoneId);
-  const drop = document.getElementById(dropId);
-  const input = document.getElementById(inputId);
-  const preview = document.getElementById(previewId);
-  const count = document.getElementById(countId);
+// ═══════════════════════════════ $ HELPER ═════════════════════════════
+function $(id) { return typeof id === 'string' ? document.getElementById(id) : id; }
 
-  drop.addEventListener('click', () => input.click());
+// ═══════════════════════════════ FILE MANAGEMENT ══════════════════════
+let uidCounter = 0;
 
-  ['dragenter', 'dragover'].forEach(e => {
-    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('dragover'); });
+function addFiles(fileList) {
+  const imgs = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+  if (!imgs.length) return;
+
+  imgs.forEach(f => {
+    // Deduplicate by name + size
+    if (state.files.find(x => x.file.name === f.name && x.file.size === f.size)) return;
+    const id = ++uidCounter;
+    const url = URL.createObjectURL(f);
+    state.files.push({ file: f, url, id });
+    addThumb(id, url);
   });
-  ['dragleave', 'drop'].forEach(e => {
-    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.remove('dragover'); });
-  });
-  zone.addEventListener('drop', ev => {
-    addFiles(Array.from(ev.dataTransfer.files), fileArray, preview, count, zone);
-  });
-  input.addEventListener('change', () => {
-    addFiles(Array.from(input.files), fileArray, preview, count, zone);
-    input.value = '';
-  });
+
+  updateCounter();
+  updateProcessBtn();
+  $('dropZone').classList.add('has-files');
 }
 
-function addFiles(newFiles, fileArray, previewEl, countEl, zoneEl) {
-  const imgFiles = newFiles.filter(f => f.type.startsWith('image/'));
-  imgFiles.forEach(f => {
-    if (!fileArray.find(x => x.name === f.name && x.size === f.size)) {
-      fileArray.push(f);
-      const img = document.createElement('img');
-      img.className = 'preview-thumb';
-      img.src = URL.createObjectURL(f);
-      img.title = f.name;
-      previewEl.appendChild(img);
-    }
-  });
-  const n = fileArray.length;
-  countEl.textContent = n > 0 ? `${n} file${n > 1 ? 's' : ''} selected` : '';
-  if (n > 0) zoneEl.classList.add('has-files');
-  checkReady();
+function addThumb(id, url) {
+  const area = $('previewArea');
+  const wrap = document.createElement('div');
+  wrap.className = 'thumb-wrap';
+  wrap.id = 'thumb-' + id;
+  wrap.innerHTML = `
+    <img src="${url}" alt="screenshot"/>
+    <div class="thumb-badge pend" id="badge-${id}">⏳ Pending</div>
+    <button class="thumb-del" title="Remove" onclick="removeFile(${id})">✕</button>
+  `;
+  area.appendChild(wrap);
 }
 
-function checkReady() {
-  document.getElementById('processBtn').disabled = !(lobbyFiles.length > 0 && resultFiles.length > 0);
+function removeFile(id) {
+  const idx = state.files.findIndex(x => x.id === id);
+  if (idx !== -1) { URL.revokeObjectURL(state.files[idx].url); state.files.splice(idx, 1); }
+  const el = $('thumb-' + id);
+  if (el) el.remove();
+  updateCounter();
+  updateProcessBtn();
+  if (state.files.length === 0) $('dropZone').classList.remove('has-files');
 }
 
-setupZone('lobbyZone',  'lobbyDrop',  'lobbyInput',  'lobbyPreview',  'lobbyCount',  lobbyFiles);
-setupZone('resultZone', 'resultDrop', 'resultInput', 'resultPreview', 'resultCount', resultFiles);
+function updateCounter() {
+  $('fileCounter').textContent = state.files.length
+    ? `${state.files.length} image${state.files.length > 1 ? 's' : ''} loaded`
+    : '';
+}
 
-// ═══════════════════════════════════════
-// MAIN PROCESS BUTTON
-// ═══════════════════════════════════════
-document.getElementById('processBtn').addEventListener('click', async () => {
-  document.getElementById('outputSection').style.display = 'none';
-  document.getElementById('rawSection').style.display = 'none';
-  document.getElementById('progressWrap').style.display = 'block';
-  document.getElementById('processBtn').disabled = true;
+function updateProcessBtn() {
+  $('processBtn').disabled = state.files.length === 0;
+}
 
-  try {
-    setProgress(0, 'Starting OCR on lobby images…');
+// ═══════════════════════════════ DROP ZONE ════════════════════════════
+const zone = $('dropZone');
 
-    // OCR all lobby images
-    const lobbyTexts = [];
-    for (let i = 0; i < lobbyFiles.length; i++) {
-      setProgress(
-        Math.round((i / (lobbyFiles.length + resultFiles.length)) * 80),
-        `Reading lobby image ${i + 1} of ${lobbyFiles.length}…`
-      );
-      const text = await ocrImage(lobbyFiles[i]);
-      lobbyTexts.push(text);
-    }
-
-    // OCR all result images
-    const resultTexts = [];
-    for (let i = 0; i < resultFiles.length; i++) {
-      setProgress(
-        Math.round(((lobbyFiles.length + i) / (lobbyFiles.length + resultFiles.length)) * 80),
-        `Reading result image ${i + 1} of ${resultFiles.length}…`
-      );
-      const text = await ocrImage(resultFiles[i]);
-      resultTexts.push(text);
-    }
-
-    const lobbyRaw = lobbyTexts.join('\n\n---IMAGE BREAK---\n\n');
-    const resultRaw = resultTexts.join('\n\n---IMAGE BREAK---\n\n');
-
-    // Store raw text for manual editing
-    lastLobbyText = lobbyRaw;
-    lastResultText = resultRaw;
-    document.getElementById('lobbyRaw').value = lobbyRaw;
-    document.getElementById('resultRaw').value = resultRaw;
-    document.getElementById('rawSection').style.display = 'block';
-
-    setProgress(85, 'Parsing lobby data…');
-    setProgress(90, 'Parsing result data…');
-    setProgress(95, 'Cross-referencing & building output…');
-
-    buildOutput(lobbyRaw, resultRaw);
-
-    setProgress(100, 'Done!');
-    setTimeout(() => {
-      document.getElementById('progressWrap').style.display = 'none';
-      document.getElementById('processBtn').disabled = false;
-      checkReady();
-    }, 800);
-
-  } catch (err) {
-    showError('OCR failed: ' + err.message);
-    document.getElementById('progressWrap').style.display = 'none';
-    document.getElementById('processBtn').disabled = false;
-    checkReady();
+zone.addEventListener('click', e => {
+  if (!e.target.closest('.thumb-del') && !e.target.closest('.btn-secondary')) {
+    $('fileInput').click();
   }
 });
+$('browseBtn').addEventListener('click', e => { e.stopPropagation(); $('fileInput').click(); });
 
-// ═══════════════════════════════════════
-// RE-PARSE BUTTON (after manual edit)
-// ═══════════════════════════════════════
-document.getElementById('reparseBtn').addEventListener('click', () => {
-  const lobbyText = document.getElementById('lobbyRaw').value;
-  const resultText = document.getElementById('resultRaw').value;
-  buildOutput(lobbyText, resultText);
+$('fileInput').addEventListener('change', function () {
+  addFiles(this.files);
+  this.value = '';  // reset so same file can be re-added after removal
 });
 
-// ═══════════════════════════════════════
-// OCR ENGINE (Tesseract.js)
-// ═══════════════════════════════════════
-async function ocrImage(file) {
-  const result = await Tesseract.recognize(file, 'eng', {
-    logger: () => {},
+['dragenter', 'dragover'].forEach(ev =>
+  zone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); zone.classList.add('over'); })
+);
+['dragleave', 'drop'].forEach(ev =>
+  zone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('over'); })
+);
+zone.addEventListener('drop', e => {
+  addFiles(e.dataTransfer.files);
+});
+
+// ═══════════════════════════════ PASTE FROM CLIPBOARD ═════════════════
+document.addEventListener('paste', e => {
+  const items = e.clipboardData?.items || [];
+  const imageItems = Array.from(items).filter(it => it.type.startsWith('image/'));
+  if (!imageItems.length) return;
+  e.preventDefault();
+  const files = imageItems.map(it => it.getAsFile()).filter(Boolean);
+  // Name pasted files by timestamp
+  const namedFiles = files.map((f, i) => {
+    const ext = f.type.split('/')[1] || 'png';
+    return new File([f], `paste_${Date.now()}_${i}.${ext}`, { type: f.type });
   });
-  return result.data.text;
+  addFiles(namedFiles);
+  toast('📋 Image pasted!', 'ok');
+});
+
+// ═══════════════════════════════ MAIN PROCESS ═════════════════════════
+$('processBtn').addEventListener('click', runProcess);
+
+async function runProcess() {
+  if (state.files.length === 0) return;
+
+  $('outputCard').style.display = 'none';
+  $('rawCard').style.display = 'none';
+  $('progressCard').style.display = 'block';
+  $('classifyRow').style.display = 'none';
+  $('processBtn').disabled = true;
+
+  state.ocrResults = [];
+
+  try {
+    const total = state.files.length;
+
+    for (let i = 0; i < total; i++) {
+      const item = state.files[i];
+      setProgress(
+        Math.round((i / total) * 90),
+        `OCR image ${i + 1} of ${total}: ${item.file.name}…`
+      );
+
+      const text = await ocrImage(item.file);
+      const type = classifyImage(text);
+      state.ocrResults.push({ id: item.id, text, type });
+
+      // Update thumbnail badge
+      const badge = $('badge-' + item.id);
+      if (badge) {
+        if (type === 'lobby') { badge.textContent = '🏟️ Lobby'; badge.className = 'thumb-badge lobby'; }
+        if (type === 'result') { badge.textContent = '🏆 Result'; badge.className = 'thumb-badge result'; }
+        if (type === 'unknown') { badge.textContent = '❓ Auto'; badge.className = 'thumb-badge pend'; }
+      }
+    }
+
+    // Show classify summary
+    const lobbyN = state.ocrResults.filter(x => x.type === 'lobby').length;
+    const resultN = state.ocrResults.filter(x => x.type === 'result').length;
+    $('lobbyCount').textContent = lobbyN;
+    $('resultCount').textContent = resultN;
+    $('classifyRow').style.display = 'flex';
+
+    setProgress(95, 'Parsing & cross-referencing…');
+
+    // Merge texts by type
+    const lobbyText = state.ocrResults.filter(x => x.type !== 'result').map(x => x.text).join('\n\n');
+    const resultText = state.ocrResults.filter(x => x.type !== 'lobby').map(x => x.text).join('\n\n');
+
+    // Save to raw editor
+    $('lobbyRaw').value = lobbyText;
+    $('resultRaw').value = resultText;
+    $('rawCard').style.display = 'block';
+
+    buildOutput(lobbyText, resultText);
+
+    setProgress(100, 'Done! ✅');
+    setTimeout(() => {
+      $('progressCard').style.display = 'none';
+      $('processBtn').disabled = false;
+    }, 1000);
+
+  } catch (err) {
+    $('progressCard').style.display = 'none';
+    $('processBtn').disabled = false;
+    toast('Error: ' + err.message);
+    console.error(err);
+  }
 }
 
-// ═══════════════════════════════════════
-// PROGRESS HELPERS
-// ═══════════════════════════════════════
-function setProgress(pct, label) {
-  document.getElementById('progressFill').style.width = pct + '%';
-  document.getElementById('progressPercent').textContent = pct + '%';
-  document.getElementById('progressLabel').textContent = label;
+// ═══════════════════════════════ OCR ══════════════════════════════════
+async function ocrImage(file) {
+  const res = await Tesseract.recognize(file, 'eng', { logger: () => { } });
+  return res.data.text || '';
 }
 
-// ═══════════════════════════════════════
-// LOBBY PARSER
-// Extracts: { slotNumber: [playerName, ...] }
-// ═══════════════════════════════════════
+// ═══════════════════════════════ IMAGE CLASSIFIER ══════════════════════
+/**
+ * Classifies OCR text as 'lobby', 'result', or 'unknown'
+ * - Lobby: contains "Elimination" (pre-match marker)
+ * - Result: contains "finish" (post-match marker)
+ */
+function classifyImage(text) {
+  const t = text.toLowerCase();
+  const hasElim = /eliminat/i.test(t);
+  const hasFinish = /finish/i.test(t);
+  const hasRemain = /remaining/i.test(t);
+
+  if (hasElim && !hasFinish) return 'lobby';
+  if (hasFinish && !hasElim) return 'result';
+  if (hasRemain && !hasFinish) return 'lobby';
+
+  if (hasElim && hasFinish) {
+    // Both — pick by count
+    const ec = (t.match(/eliminat/g) || []).length;
+    const fc = (t.match(/finish/g) || []).length;
+    return ec >= fc ? 'lobby' : 'result';
+  }
+
+  return 'unknown';
+}
+
+// ═══════════════════════════════ RE-PARSE BUTTON ═══════════════════════
+$('reparseBtn').addEventListener('click', () => {
+  buildOutput($('lobbyRaw').value, $('resultRaw').value);
+});
+
+// ═══════════════════════════════ LOBBY PARSER ═════════════════════════
+/**
+ * Returns { slotNum: [playerName, ...], ... }
+ */
 function parseLobby(text) {
   const slots = {};
-  // Normalize text
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-  let currentSlot = null;
+  // Split on image boundaries and process each section
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let curSlot = null;
 
   for (const line of lines) {
-    // Skip image break markers
-    if (line.includes('---IMAGE BREAK---')) { continue; }
+    // Skip UI header lines
+    if (/remaining|^team\s+\d|stage|match\s+start|image\s+break/i.test(line)) continue;
 
-    // Detect slot number: a line starting with 1-2 digits (slot 1–50)
-    // Slot number may appear alone OR with the first player on same line
-    // E.g.: "06 REharshOG /0 Eliminations" OR just "06"
-    const slotLineMatch = line.match(/^(\d{1,2})\s+(.*)/);
-    const soloNumber = line.match(/^(\d{1,2})$/);
+    // ── Pattern: "06 REharshOG /0 Eliminations" (slot + player on same line)
+    const fullLine = line.match(/^(\d{1,2})\s+(.+?)(?:\s+\/[0oO]\s*Eliminat.*)?$/i);
+    // ── Pattern: standalone slot number
+    const soloNum = line.match(/^(\d{1,2})$/);
+    // ── Pattern: player line with Eliminations
+    const elimLine = line.match(/^(.+?)\s+\/[0oO]\s*Eliminat/i);
+    // ── Pattern: "PlayerName /0 Eliminations" compact
+    const elimLine2 = line.match(/^(.+?)\/[0oO]\s*Eliminat/i);
 
-    if (soloNumber) {
-      const n = parseInt(soloNumber[1]);
-      if (n >= 1 && n <= 50) {
-        currentSlot = n;
-        if (!slots[currentSlot]) slots[currentSlot] = [];
+    if (soloNum) {
+      const n = +soloNum[1];
+      if (n >= 1 && n <= 60) { curSlot = n; slots[curSlot] = slots[curSlot] || []; }
+      continue;
+    }
+
+    if (fullLine) {
+      const n = +fullLine[1];
+      if (n >= 1 && n <= 60) {
+        curSlot = n;
+        slots[curSlot] = slots[curSlot] || [];
+        const rest = fullLine[2].replace(/\/[0oO]\s*Eliminat.*/i, '').trim();
+        if (rest.length > 1) addPlayer(slots[curSlot], rest);
         continue;
       }
     }
 
-    if (slotLineMatch) {
-      const n = parseInt(slotLineMatch[1]);
-      if (n >= 1 && n <= 50) {
-        currentSlot = n;
-        if (!slots[currentSlot]) slots[currentSlot] = [];
-        // Rest of line may be a player name
-        const rest = slotLineMatch[2].replace(/\/[0oO]\s*Eliminations?/gi, '').trim();
-        if (rest.length > 1 && !rest.match(/^elimination/i)) {
-          slots[currentSlot].push(cleanPlayerName(rest));
-        }
+    if (curSlot !== null) {
+      if (elimLine) {
+        const name = elimLine[1].trim();
+        addPlayer(slots[curSlot], name);
         continue;
       }
-    }
-
-    // Player line: contains "/0 Eliminations" or just a name
-    if (currentSlot !== null) {
-      const isElimLine = line.match(/\/[0oO]\s*Elim/i);
-      if (isElimLine) {
-        const playerName = line.replace(/\/[0oO]\s*Eliminations?/gi, '').trim();
-        const cleaned = cleanPlayerName(playerName);
-        if (cleaned.length > 1 && !slots[currentSlot].includes(cleaned)) {
-          slots[currentSlot].push(cleaned);
-        }
-      } else if (line.match(/Remaining|Team\s+\d|Stage|Match\s+start/i)) {
-        // Skip UI text
-      } else {
-        // Might be a player name without "Eliminations" (OCR missed it)
-        const cleaned = cleanPlayerName(line);
-        if (cleaned.length > 1 && cleaned.length < 30 && !cleaned.match(/^\d+$/) && !cleaned.match(/elimination/i)) {
-          if (slots[currentSlot] && slots[currentSlot].length < 6) {
-            if (!slots[currentSlot].includes(cleaned)) {
-              slots[currentSlot].push(cleaned);
-            }
-          }
-        }
+      if (elimLine2) {
+        const name = elimLine2[1].trim();
+        addPlayer(slots[curSlot], name);
+        continue;
+      }
+      // Plain text line that might be a player name
+      if (line.length > 1 && line.length < 32 && !/^\d+$/.test(line) && !/eliminat/i.test(line)) {
+        addPlayer(slots[curSlot], line);
       }
     }
   }
@@ -245,154 +299,111 @@ function parseLobby(text) {
   return slots;
 }
 
-// ═══════════════════════════════════════
-// RESULT PARSER
-// Extracts: { rank: { players: [], kills: [] } }
-// ═══════════════════════════════════════
+function addPlayer(arr, name) {
+  const clean = name.replace(/\/[0oO]\s*Eliminat.*/i, '').trim();
+  if (clean.length > 1 && arr.length < 6 && !arr.includes(clean)) {
+    arr.push(clean);
+  }
+}
+
+// ═══════════════════════════════ RESULT PARSER ════════════════════════
+/**
+ * Returns { rank: { players: [], kills: [] }, ... }
+ */
 function parseResult(text) {
   const ranks = {};
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-  let currentRank = null;
-  let rank1Assigned = false;
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let curRank = null;
+  let foundRank1 = false;
 
   for (const line of lines) {
-    if (line.includes('---IMAGE BREAK---')) { currentRank = null; continue; }
+    if (/image\s+break|continue|^stage/i.test(line)) continue;
 
-    // Detect "X finishes" or "X finish" — this is the key result pattern
-    // Formats: "PlayerName 5 finishes" or "5 finishes PlayerName" (OCR may vary)
-    const killAfter  = line.match(/^(.+?)\s+(\d+)\s+finish(?:es)?/i);
-    const killBefore = line.match(/^(\d+)\s+finish(?:es)?\s+(.+)/i);
-    const killOnly   = line.match(/^(\d+)\s+finish(?:es)?$/i);
+    // ── "PlayerName 5 finishes" or "PlayerName 1 finish"
+    const killMatch = line.match(/^(.+?)\s+(\d+)\s+finish(?:es)?/i);
+    // ── "5 finishes" alone (OCR split)
+    // ── Standalone rank number
+    const rankMatch = line.match(/^(\d{1,2})$/);
 
-    // Detect standalone rank number (1-30) on its own line
-    const rankLine = line.match(/^(\d{1,2})$/);
-
-    if (rankLine) {
-      const n = parseInt(rankLine[1]);
-      if (n >= 1 && n <= 50) {
-        currentRank = n;
-        if (!ranks[currentRank]) ranks[currentRank] = { players: [], kills: [] };
-        if (n === 1) rank1Assigned = true;
-        continue;
+    if (rankMatch) {
+      const n = +rankMatch[1];
+      if (n >= 1 && n <= 60) {
+        curRank = n;
+        ranks[curRank] = ranks[curRank] || { players: [], kills: [] };
+        if (n === 1) foundRank1 = true;
       }
+      continue;
     }
 
-    if (killAfter) {
-      // Assign to rank 1 if no rank seen yet (rank 1 LEFT panel doesn't show "1")
-      if (currentRank === null && !rank1Assigned) {
-        currentRank = 1;
+    if (killMatch) {
+      // If we haven't seen any rank yet, assume rank 1 (left panel, no explicit "1")
+      if (curRank === null) {
+        curRank = 1;
+        foundRank1 = true;
         ranks[1] = { players: [], kills: [] };
-        rank1Assigned = true;
       }
-      if (currentRank === null) continue;
-      if (!ranks[currentRank]) ranks[currentRank] = { players: [], kills: [] };
+      if (!ranks[curRank]) ranks[curRank] = { players: [], kills: [] };
 
-      const player = cleanPlayerName(killAfter[1]);
-      const kills  = parseInt(killAfter[2]);
+      const player = killMatch[1].trim();
+      const kills = parseInt(killMatch[2], 10);
       if (player.length > 0) {
-        ranks[currentRank].players.push(player);
-        ranks[currentRank].kills.push(kills);
+        ranks[curRank].players.push(player);
+        ranks[curRank].kills.push(kills);
       }
-      continue;
-    }
-
-    if (killBefore) {
-      if (currentRank === null && !rank1Assigned) {
-        currentRank = 1;
-        ranks[1] = { players: [], kills: [] };
-        rank1Assigned = true;
-      }
-      if (currentRank === null) continue;
-      if (!ranks[currentRank]) ranks[currentRank] = { players: [], kills: [] };
-      const player = cleanPlayerName(killBefore[2]);
-      const kills  = parseInt(killBefore[1]);
-      if (player.length > 0) {
-        ranks[currentRank].players.push(player);
-        ranks[currentRank].kills.push(kills);
-      }
-      continue;
-    }
-
-    if (killOnly) {
-      // "0 finishes" alone on a line — OCR split player name from kills
-      // Can't reliably assign without name, skip
-      continue;
     }
   }
 
   return ranks;
 }
 
-// ═══════════════════════════════════════
-// CROSS-REFERENCE ENGINE
-// Links lobby slots → result ranks via player name matching
-// ═══════════════════════════════════════
+// ═══════════════════════════════ CROSS-REFERENCE ══════════════════════
 function crossReference(slotMap, rankMap) {
   const slotNums = Object.keys(slotMap).map(Number).sort((a, b) => a - b);
-  if (slotNums.length === 0) return {};
+  if (!slotNums.length) return {};
 
-  const minSlot = slotNums[0];
-  const maxSlot = slotNums[slotNums.length - 1];
-
-  const output = {};
+  const min = slotNums[0], max = slotNums[slotNums.length - 1];
   const usedRanks = new Set();
+  const output = {};
 
-  for (let slot = minSlot; slot <= maxSlot; slot++) {
-    const players = slotMap[slot] || null;
+  for (let s = min; s <= max; s++) {
+    const players = slotMap[s];
 
     if (!players || players.length === 0) {
-      // Missing slot
-      output[slot] = {
-        rank: '""',
-        teamKills: '""',
-        players: [],
-        playerKills: []
-      };
+      output[s] = { rank: '""', teamKills: '""', players: [], playerKills: [] };
       continue;
     }
 
-    // Find best matching rank for this slot's players
-    let bestRank = null;
-    let bestScore = -1;
-
-    for (const [rankStr, rankData] of Object.entries(rankMap)) {
-      const rank = parseInt(rankStr);
-      if (usedRanks.has(rank)) continue;
-      const score = fuzzyMatchScore(players, rankData.players);
-      if (score > bestScore) {
-        bestScore = score;
-        bestRank = rank;
-      }
+    // Find best matching rank group
+    let bestRank = null, bestScore = 0;
+    for (const [rk, rd] of Object.entries(rankMap)) {
+      if (usedRanks.has(+rk)) continue;
+      const sc = matchScore(players, rd.players);
+      if (sc > bestScore) { bestScore = sc; bestRank = +rk; }
     }
 
     if (bestRank !== null && bestScore > 0) {
       usedRanks.add(bestRank);
-      const rankData = rankMap[bestRank];
+      const rd = rankMap[bestRank];
+      let total = 0;
 
-      // Build player-kills mapping
-      const playerKills = players.map(lobbyPlayer => {
-        const idx = findBestMatchIndex(lobbyPlayer, rankData.players);
+      const playerKills = players.map(p => {
+        const idx = bestMatchIdx(p, rd.players);
         if (idx !== -1) {
-          const k = rankData.kills[idx];
+          const k = rd.kills[idx];
+          total += k;
           return k === 0 ? '""' : k;
         }
         return '""';
       });
 
-      const totalKills = players.reduce((sum, lobbyPlayer) => {
-        const idx = findBestMatchIndex(lobbyPlayer, rankData.players);
-        return idx !== -1 ? sum + rankData.kills[idx] : sum;
-      }, 0);
-
-      output[slot] = {
+      output[s] = {
         rank: bestRank,
-        teamKills: totalKills === 0 ? '""' : totalKills,
+        teamKills: total === 0 ? '""' : total,
         players,
         playerKills
       };
     } else {
-      output[slot] = {
+      output[s] = {
         rank: '""',
         teamKills: '""',
         players,
@@ -404,173 +415,139 @@ function crossReference(slotMap, rankMap) {
   return output;
 }
 
-// Score how many players match between two lists (normalized)
-function fuzzyMatchScore(lobbyPlayers, resultPlayers) {
+function matchScore(lobbyPs, resultPs) {
   let score = 0;
-  const normResult = resultPlayers.map(normName);
-  for (const lp of lobbyPlayers) {
-    const nLp = normName(lp);
-    for (const rp of normResult) {
-      const s = similarity(nLp, rp);
-      if (s > 0.65) { score++; break; }
-    }
+  const norm = resultPs.map(normStr);
+  for (const lp of lobbyPs) {
+    const nl = normStr(lp);
+    if (norm.some(rp => diceSim(nl, rp) > 0.62)) score++;
   }
   return score;
 }
 
-function findBestMatchIndex(lobbyPlayer, resultPlayers) {
-  const nLp = normName(lobbyPlayer);
-  let bestIdx = -1;
-  let bestSim = 0.6; // threshold
-  for (let i = 0; i < resultPlayers.length; i++) {
-    const s = similarity(nLp, normName(resultPlayers[i]));
-    if (s > bestSim) { bestSim = s; bestIdx = i; }
+function bestMatchIdx(lobbyP, resultPs) {
+  const nl = normStr(lobbyP);
+  let best = -1, bestS = 0.58;
+  for (let i = 0; i < resultPs.length; i++) {
+    const s = diceSim(nl, normStr(resultPs[i]));
+    if (s > bestS) { bestS = s; best = i; }
   }
-  return bestIdx;
+  return best;
 }
 
-// Normalize name for comparison
-function normName(name) {
-  return String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
-}
+function normStr(s) { return String(s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
 
-// Simple character-level similarity (Dice coefficient)
-function similarity(a, b) {
+function diceSim(a, b) {
   if (a === b) return 1;
   if (a.length < 2 || b.length < 2) return a === b ? 1 : 0;
-  const aBigrams = new Map();
-  for (let i = 0; i < a.length - 1; i++) {
-    const bg = a.slice(i, i + 2);
-    aBigrams.set(bg, (aBigrams.get(bg) || 0) + 1);
-  }
-  let intersect = 0;
+  const ab = new Map();
+  for (let i = 0; i < a.length - 1; i++) { const g = a.slice(i, i + 2); ab.set(g, (ab.get(g) || 0) + 1); }
+  let inter = 0;
   for (let i = 0; i < b.length - 1; i++) {
-    const bg = b.slice(i, i + 2);
-    if (aBigrams.has(bg) && aBigrams.get(bg) > 0) {
-      intersect++;
-      aBigrams.set(bg, aBigrams.get(bg) - 1);
-    }
+    const g = b.slice(i, i + 2);
+    if (ab.has(g) && ab.get(g) > 0) { inter++; ab.set(g, ab.get(g) - 1); }
   }
-  return (2 * intersect) / (a.length + b.length - 2);
+  return (2 * inter) / (a.length + b.length - 2);
 }
 
-// Clean noisy OCR player name
-function cleanPlayerName(name) {
-  return name
-    .replace(/\/[0oO]\s*Eliminations?/gi, '')
-    .replace(/^\s*[\d]{1,2}\s+/, '') // Remove leading slot number
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
+// ═══════════════════════════════ OUTPUT BUILDER ════════════════════════
+function buildOutput(lobbyText, resultText) {
+  let slotMap, rankMap;
 
-// ═══════════════════════════════════════
-// OUTPUT BUILDER
-// Pads each slot to 6 rows for Blocks 4 & 5
-// ═══════════════════════════════════════
-function buildOutput(lobbyRaw, resultRaw) {
-  const slotMap = parseLobby(lobbyRaw);
-  const rankMap = parseResult(resultRaw);
-  const data    = crossReference(slotMap, rankMap);
+  try { slotMap = parseLobby(lobbyText); }
+  catch (e) { slotMap = {}; }
 
-  const allSlots = Object.keys(data).map(Number).sort((a, b) => a - b);
+  try { rankMap = parseResult(resultText); }
+  catch (e) { rankMap = {}; }
 
-  if (allSlots.length === 0) {
-    showError('Could not detect any slot numbers. Check raw OCR text and re-parse manually.');
+  if (Object.keys(slotMap).length === 0) {
+    toast('⚠️ No slot numbers found in lobby text. Try editing the Raw OCR and Re-Parse.');
     return;
   }
 
-  const ROWS_PER_SLOT = 6;
+  const data = crossReference(slotMap, rankMap);
+  const allSlots = Object.keys(data).map(Number).sort((a, b) => a - b);
+  const ROWS = 6;
 
   const b1 = [], b2 = [], b3 = [], b4 = [], b5 = [];
+  let complete = 0, missing = 0;
 
-  let totalComplete = 0;
-  let totalMissing  = 0;
+  for (const s of allSlots) {
+    const d = data[s];
+    const ok = d.rank !== '""';
+    if (ok) complete++; else missing++;
 
-  for (const slot of allSlots) {
-    const d = data[slot];
-    const isComplete = d.rank !== '""';
-    if (isComplete) totalComplete++; else totalMissing++;
-
-    // Blocks 1, 2, 3 — one line per slot
-    b1.push(slot);
+    b1.push(s);
     b2.push(d.rank);
     b3.push(d.teamKills);
 
-    // Blocks 4, 5 — 6 lines per slot
-    const players = d.players.slice(0, ROWS_PER_SLOT);
-    const kills   = d.playerKills.slice(0, ROWS_PER_SLOT);
-
-    for (let r = 0; r < ROWS_PER_SLOT; r++) {
-      b4.push(r < players.length ? players[r] : '""');
-      b5.push(r < kills.length   ? kills[r]   : '""');
+    for (let r = 0; r < ROWS; r++) {
+      b4.push(r < d.players.length ? d.players[r] : '""');
+      b5.push(r < d.playerKills.length ? d.playerKills[r] : '""');
     }
   }
 
-  // Write to textareas
-  document.getElementById('block1').value = b1.join('\n');
-  document.getElementById('block2').value = b2.join('\n');
-  document.getElementById('block3').value = b3.join('\n');
-  document.getElementById('block4').value = b4.join('\n');
-  document.getElementById('block5').value = b5.join('\n');
+  $('b1').value = b1.join('\n');
+  $('b2').value = b2.join('\n');
+  $('b3').value = b3.join('\n');
+  $('b4').value = b4.join('\n');
+  $('b5').value = b5.join('\n');
 
-  // Summary
-  const now = new Date();
-  const day = String(now.getDate()).padStart(2,'0');
-  const mon = now.toLocaleString('en-US', { month: 'short' });
-  let h = now.getHours(); const m = String(now.getMinutes()).padStart(2,'0');
-  const ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
-  const stamp = `📅 ${day}/${mon} · ${h}:${m} ${ampm}`;
+  const s = stamp();
+  $('outputStamp').textContent = `📅 ${s}`;
+  $('summary').textContent = `📊 ${s}  |  ${allSlots.length} slots processed  ·  Blocks 1–3: ${allSlots.length} lines  ·  Blocks 4–5: ${allSlots.length * ROWS} lines  ·  ${complete} complete  ·  ${missing} missing`;
 
-  document.getElementById('outputMeta').textContent = stamp;
-  document.getElementById('summaryBar').textContent =
-    `📊 ${stamp}  |  Processed ${allSlots.length} slots  ·  Blocks 1–3: ${allSlots.length} lines  ·  Blocks 4–5: ${allSlots.length * ROWS_PER_SLOT} lines  ·  ${totalComplete} complete  ·  ${totalMissing} missing`;
-
-  document.getElementById('outputSection').style.display = 'block';
-  document.getElementById('outputSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('outputCard').style.display = 'block';
+  $('outputCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ═══════════════════════════════════════
-// COPY BUTTONS
-// ═══════════════════════════════════════
-function copyBlock(blockId) {
-  const el = document.getElementById(blockId);
-  navigator.clipboard.writeText(el.value).then(() => {
-    const btn = el.closest('.output-block').querySelector('.copy-btn');
-    const orig = btn.textContent;
-    btn.textContent = '✓ Copied!';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1800);
-  }).catch(() => {
-    el.select();
-    document.execCommand('copy');
+// ═══════════════════════════════ COPY BUTTONS ══════════════════════════
+document.querySelectorAll('.btn-copy').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const id = btn.dataset.target;
+    const ta = $(id);
+    const val = ta.value;
+    navigator.clipboard.writeText(val).then(() => {
+      btn.textContent = '✓ Copied!';
+      btn.classList.add('ok');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1800);
+    }).catch(() => {
+      ta.select(); document.execCommand('copy');
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1800);
+    });
   });
-}
+});
 
-// ═══════════════════════════════════════
-// RESET
-// ═══════════════════════════════════════
-function resetAll() {
-  lobbyFiles.length = 0;
-  resultFiles.length = 0;
-  document.getElementById('lobbyPreview').innerHTML  = '';
-  document.getElementById('resultPreview').innerHTML = '';
-  document.getElementById('lobbyCount').textContent  = '';
-  document.getElementById('resultCount').textContent = '';
-  document.getElementById('lobbyZone').classList.remove('has-files');
-  document.getElementById('resultZone').classList.remove('has-files');
-  document.getElementById('outputSection').style.display = 'none';
-  document.getElementById('rawSection').style.display    = 'none';
-  document.getElementById('progressWrap').style.display  = 'none';
-  checkReady();
+// ═══════════════════════════════ RESET ════════════════════════════════
+$('resetBtn').addEventListener('click', () => {
+  state.files.forEach(x => URL.revokeObjectURL(x.url));
+  state.files.length = 0;
+  state.ocrResults.length = 0;
+  $('previewArea').innerHTML = '';
+  $('fileCounter').textContent = '';
+  $('dropZone').classList.remove('has-files', 'over');
+  $('outputCard').style.display = 'none';
+  $('rawCard').style.display = 'none';
+  $('progressCard').style.display = 'none';
+  updateProcessBtn();
   window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+// ═══════════════════════════════ PROGRESS ═════════════════════════════
+function setProgress(pct, label) {
+  $('progressFill').style.width = pct + '%';
+  $('progressSub').textContent = pct + '%';
+  $('progressLabel').textContent = label;
 }
 
-// ═══════════════════════════════════════
-// ERROR TOAST
-// ═══════════════════════════════════════
-function showError(msg) {
-  const el = document.getElementById('errorToast');
-  el.textContent = '⚠️ ' + msg;
+// ═══════════════════════════════ TOAST ════════════════════════════════
+function toast(msg, type = 'error') {
+  const el = $('toast');
+  el.textContent = (type === 'ok' ? '✅ ' : '⚠️ ') + msg;
+  el.style.background = type === 'ok' ? 'rgba(0,229,200,0.12)' : 'rgba(255,70,70,0.12)';
+  el.style.borderColor = type === 'ok' ? 'rgba(0,229,200,0.4)' : 'rgba(255,70,70,0.4)';
+  el.style.color = type === 'ok' ? '#00e5c8' : '#ff9090';
   el.style.display = 'block';
-  setTimeout(() => { el.style.display = 'none'; }, 6000);
+  setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
