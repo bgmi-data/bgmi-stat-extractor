@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BGMI Stat Extractor — Kill + Rank + Fragger</title>
+  <meta name="description" content="Free BGMI tournament stat extractor. Upload lobby and result screenshots to auto-extract Slots, Ranks, and Kills. No AI API needed." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header>
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">🎮</span>
+        <div>
+          <h1>BGMI Stat Extractor</h1>
+          <p class="logo-sub">Kill · Rank · Fragger — Free Forever</p>
+        </div>
+      </div>
+      <div class="session-time" id="sessionTime">--/--- · --:-- --</div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- STEP 1 & 2: UPLOAD ZONES -->
+    <section class="upload-section">
+      <h2 class="section-title">📂 Step 1 — Upload Screenshots</h2>
+      <div class="upload-grid">
+
+        <!-- LOBBY ZONE -->
+        <div class="upload-zone" id="lobbyZone">
+          <div class="zone-inner" id="lobbyDrop">
+            <div class="zone-icon">🏟️</div>
+            <div class="zone-label">LOBBY Screenshots</div>
+            <div class="zone-hint">Drag &amp; drop or click to select<br/><small>(Multiple files OK)</small></div>
+            <input type="file" id="lobbyInput" accept="image/*" multiple hidden />
+            <button class="upload-btn" onclick="document.getElementById('lobbyInput').click()">Choose Files</button>
+          </div>
+          <div class="preview-grid" id="lobbyPreview"></div>
+          <div class="file-count" id="lobbyCount"></div>
+        </div>
+
+        <!-- RESULT ZONE -->
+        <div class="upload-zone" id="resultZone">
+          <div class="zone-inner" id="resultDrop">
+            <div class="zone-icon">🏆</div>
+            <div class="zone-label">RESULT Screenshots</div>
+            <div class="zone-hint">Drag &amp; drop or click to select<br/><small>(Multiple files OK)</small></div>
+            <input type="file" id="resultInput" accept="image/*" multiple hidden />
+            <button class="upload-btn" onclick="document.getElementById('resultInput').click()">Choose Files</button>
+          </div>
+          <div class="preview-grid" id="resultPreview"></div>
+          <div class="file-count" id="resultCount"></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- STEP 2: PROCESS -->
+    <section class="process-section">
+      <button class="process-btn" id="processBtn" disabled>
+        <span class="btn-icon">⚡</span> Extract Data
+      </button>
+      <div class="progress-wrap" id="progressWrap" style="display:none">
+        <div class="progress-label" id="progressLabel">Initialising OCR…</div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-percent" id="progressPercent">0%</div>
+      </div>
+    </section>
+
+    <!-- RAW OCR TOGGLE (for debugging) -->
+    <section class="raw-section" id="rawSection" style="display:none">
+      <details class="raw-details">
+        <summary>🔍 View Raw OCR Text (for manual corrections)</summary>
+        <div class="raw-grid">
+          <div>
+            <h4>Lobby OCR Text</h4>
+            <textarea id="lobbyRaw" class="raw-textarea" rows="12" placeholder="Lobby OCR output will appear here…"></textarea>
+          </div>
+          <div>
+            <h4>Result OCR Text</h4>
+            <textarea id="resultRaw" class="raw-textarea" rows="12" placeholder="Result OCR output will appear here…"></textarea>
+          </div>
+        </div>
+        <button class="reparse-btn" id="reparseBtn">♻️ Re-Parse from Edited Text</button>
+      </details>
+    </section>
+
+    <!-- OUTPUT SECTION -->
+    <section class="output-section" id="outputSection" style="display:none">
+      <h2 class="section-title">📊 Step 2 — Copy Your Data</h2>
+
+      <div class="output-meta" id="outputMeta"></div>
+
+      <div class="blocks-grid">
+
+        <!-- BLOCK 1: Slot Numbers -->
+        <div class="output-block" id="block1Wrap">
+          <div class="block-header">
+            <span class="block-label">📋 Column 1 — Slot Numbers</span>
+            <button class="copy-btn" onclick="copyBlock('block1')">Copy</button>
+          </div>
+          <textarea class="block-textarea" id="block1" readonly></textarea>
+        </div>
+
+        <!-- BLOCK 2: Ranks -->
+        <div class="output-block" id="block2Wrap">
+          <div class="block-header">
+            <span class="block-label">📋 Column 2 — Ranks</span>
+            <button class="copy-btn" onclick="copyBlock('block2')">Copy</button>
+          </div>
+          <textarea class="block-textarea" id="block2" readonly></textarea>
+        </div>
+
+        <!-- BLOCK 3: Team Total Kills -->
+        <div class="output-block" id="block3Wrap">
+          <div class="block-header">
+            <span class="block-label">📋 Column 3 — Team Total Kills</span>
+            <button class="copy-btn" onclick="copyBlock('block3')">Copy</button>
+          </div>
+          <textarea class="block-textarea" id="block3" readonly></textarea>
+        </div>
+
+        <!-- BLOCK 4: Player Names -->
+        <div class="output-block wide" id="block4Wrap">
+          <div class="block-header">
+            <span class="block-label">📋 Column 4 — Player Names <small>(6 rows/slot)</small></span>
+            <button class="copy-btn" onclick="copyBlock('block4')">Copy</button>
+          </div>
+          <textarea class="block-textarea tall" id="block4" readonly></textarea>
+        </div>
+
+        <!-- BLOCK 5: Individual Kills -->
+        <div class="output-block wide" id="block5Wrap">
+          <div class="block-header">
+            <span class="block-label">📋 Column 5 — Individual Kills <small>(6 rows/slot)</small></span>
+            <button class="copy-btn" onclick="copyBlock('block5')">Copy</button>
+          </div>
+          <textarea class="block-textarea tall" id="block5" readonly></textarea>
+        </div>
+
+      </div>
+
+      <div class="summary-bar" id="summaryBar"></div>
+
+      <button class="reset-btn" onclick="resetAll()">🔄 Process New Match</button>
+    </section>
+
+    <!-- ERROR -->
+    <div class="error-toast" id="errorToast" style="display:none"></div>
+
+  </main>
+
+  <footer>
+    <p>🎮 BGMI Stat Extractor · Free &amp; Open Source · Hosted on GitHub Pages · OCR by <a href="https://github.com/naptha/tesseract.js" target="_blank">Tesseract.js</a></p>
+  </footer>
+
+  <!-- Tesseract.js from CDN — runs 100% in browser, no API key needed -->
+  <script src="https://unpkg.com/tesseract.js@4/dist/tesseract.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
